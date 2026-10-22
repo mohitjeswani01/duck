@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, String, func
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -16,5 +16,7 @@ class Repo(Base):
     owner: Mapped[str] = mapped_column(String, nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=False)
     default_branch: Mapped[str] = mapped_column(String, nullable=False, default="main")
-    file_tree_cache: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Set after a tarball download completes; connect_repo reuses the stored copy
+    # while this is within settings.repo_cache_ttl_seconds, else re-downloads.
+    last_indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

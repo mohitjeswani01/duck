@@ -4,6 +4,7 @@ from app.models.fix import Fix
 from app.models.hypothesis import Hypothesis
 from app.models.message import Message
 from app.models.repo import Repo
+from app.models.repo_file import RepoFile
 from app.models.session import Session
 
 __all__ = [
@@ -15,5 +16,6 @@ __all__ = [
     "Hypothesis",
     "Message",
     "Repo",
+    "RepoFile",
     "Session",
 ]

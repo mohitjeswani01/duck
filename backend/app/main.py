@@ -24,3 +24,8 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(admin.router)
 app.include_router(repos.router)
+
+if settings.enable_dev_tools:
+    from app.routers import dev_tools
+
+    app.include_router(dev_tools.router)

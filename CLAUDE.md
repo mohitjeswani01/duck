@@ -88,7 +88,8 @@ Wire format: standard SSE (`event: <type>\ndata: <json>\n\n`), with a heartbeat 
 
 A resolved **session** is the bug-journal entry — no separate journal table. Postgres full-text search (`search_vector`, a generated `tsvector` column) covers "search past bugs."
 
-- **repos** — `id, github_url, owner, name, default_branch, file_tree_cache (jsonb), created_at`
+- **repos** — `id, github_url, owner, name, default_branch, last_indexed_at, created_at`
+- **repo_files** — `id, repo_id FK, file_path, content, size_bytes, language, created_at` (Phase 2 — replaces the original `file_tree_cache` jsonb column, dropped in migration 0002; see "Repo connection" below)
 - **sessions** — `id, repo_id FK, title, status (active/resolved/abandoned), current_phase (listening/clarifying/investigating/hypothesis/fix_proposed/resolved), resolution_summary, root_cause, tags (text[]), words_spoken_count (int, default 0), search_vector (generated tsvector), created_at, updated_at`
 - **messages** — `id, session_id FK, role (user/assistant), phase_at_time, content, created_at`
 - **file_reads** — `id, session_id FK, file_path, reason, created_at`
@@ -127,9 +128,35 @@ Unit tests (`backend/tests/test_gemini_key_pool.py`) mock the Gemini call and co
 - Backend reads its port from the `PORT` env var Render injects — never a hardcoded port.
 - CORS allow-list comes from `ALLOWED_ORIGINS` (comma-separated env var) — the deployed Vercel URL plus `localhost` origins for dev. Nothing else is allowed.
 
+## Repo connection (Phase 2 — tarball download, not per-file API calls)
+
+Connecting a repo does **one** GitHub API call for metadata + **one** tarball download — never a per-file fetch, never the code search API (it needs a token and has a punishing rate limit that would break a live demo). `backend/app/services/github_client.py` validates the URL strictly (public `github.com` only, with/without `.git`, with/without a trailing slash), fetches `/repos/{owner}/{repo}` to confirm it's public and get the default branch, downloads `/repos/{owner}/{repo}/tarball/{branch}`, and extracts it in-memory with `tarfile`. The GitHub token (`GITHUB_TOKEN`) is optional and used automatically when present; unauthenticated requests just get the lower 60/hr GitHub rate limit, which is fine since each connect is 2 calls total.
+
+Filtering during extraction (all caps are env vars):
+- Skips directories: `node_modules, dist, build, .next, .git, vendor, .venv, venv, __pycache__, .cache, .turbo, coverage, .pytest_cache, target, .idea, .vscode, out`.
+- Skips lock files (`package-lock.json`, `yarn.lock`, etc.), `*.min.js`/`*.min.css`, known binary/image/archive extensions, and anything that decodes as binary (null byte in the first 1KB, or a `UnicodeDecodeError`).
+- Skips any single file over `REPO_MAX_FILE_BYTES` (default 200KB).
+- Rejects the whole repo — before storing anything — if it exceeds `REPO_MAX_FILES` (default 500) or `REPO_MAX_TOTAL_BYTES` (default 5MB), with the friendly message "Duck works best on small to medium repos."
+
+Filtered files are stored in the `repo_files` table (see schema above), keyed by `(repo_id, file_path)`. Reconnecting the same repo reuses the stored copy if `last_indexed_at` is within `REPO_CACHE_TTL_SECONDS` (default 1 hour); otherwise it re-downloads and replaces all rows for that repo. `list_files` / `read_file` / `search_code` (below) only ever query this table — GitHub is never touched again after connect.
+
+Errors (invalid URL, repo not found/private, GitHub rate-limited, repo too large, GitHub unreachable) are all typed exceptions with a `friendly_message`, mapped to HTTP status codes in `app/routers/repos.py` — the frontend never sees a raw exception.
+
+## File tools (Phase 2 — plain Python functions + Gemini function declarations)
+
+`backend/app/services/file_tools.py` implements `list_files`, `read_file`, `search_code` as DB-backed async functions, with the actual matching/formatting logic factored into pure, DB-free functions (`list_files_pure`, `read_file_pure`, `search_code_pure`) so they're unit-testable without Postgres. They only ever read from `repo_files` — never the real filesystem, never GitHub again.
+
+- **`list_files(pattern?)`** — directory-prefix or glob (via `fnmatch`, so `*` is not directory-scoped) match against stored paths, capped at `TOOL_LIST_FILES_MAX_RESULTS` (default 200), sorted, with a `truncated` flag.
+- **`read_file(path, start_line?, end_line?)`** — every returned line is numbered. No range + short file → whole file. No range + long file → first `TOOL_READ_FILE_MAX_LINES` lines (default 300) plus a truncation note with the real total line count. A path containing `..`, a leading `/`, or an empty segment is rejected before any lookup (`PathTraversalError`) — defense in depth, even though stored paths can never actually contain `..` themselves.
+- **`search_code(query, file_pattern?, is_regex?)`** — literal substring search is always safe (linear `in`); regex search skips any line longer than 300 chars before matching (bounds worst-case backtracking) and the whole call runs in a worker thread under an `asyncio.wait_for` timeout (`TOOL_SEARCH_TIMEOUT_SECONDS`, default 3s) — on timeout it returns `timed_out=True` with partial/no results rather than hanging the request. Results capped at `TOOL_SEARCH_MAX_RESULTS` (default 50), each with ~1 line of context on either side.
+- All three tool outputs are additionally capped at `TOOL_OUTPUT_MAX_CHARS` (default 20,000) before being handed back, so one huge match can't blow up Gemini's context.
+- `read_file` and `search_code`, when called with a `session_id`, write to `file_reads` (one row per file actually read/matched) and emit a `tool_call` SSE event via an injected `emit` callback — both optional, since Phase 2 has no live session/turn endpoint yet. Phase 3's conversation engine passes both. `list_files` only emits the SSE event (no single file was "read").
+- Gemini-facing schemas live in `app/services/tool_declarations.py` as `types.FunctionDeclaration(..., parameters_json_schema={...})` — the plain-JSON-Schema form confirmed against the current `google-genai` docs — bundled into `FILE_TOOLS = types.Tool(function_declarations=[...])`, ready for Phase 3 to pass straight into `GenerateContentConfig(tools=[FILE_TOOLS])`.
+- `POST /dev/tools/{list_files,read_file,search_code}` lets these be curl-tested directly against a connected repo, bypassing the (not-yet-built) conversation loop. Only registered in `app/main.py` when `ENABLE_DEV_TOOLS=true` — the routes don't exist at all otherwise, so there's nothing to accidentally expose in production.
+
 ## Sample buggy repo (Phase 2, author's own repo — not a borrowed one)
 
-A small, realistic app (Next.js or Express task manager) with 2–3 **planted, subtle** bugs — the kind that require Duck to actually read files and reason, not spot an obvious typo. Candidates: an auth token that doesn't refresh correctly, an off-by-one in pagination, a stale-state bug in React. Pushed to the author's own public GitHub. The expected root cause of each planted bug is written down separately so Duck's hypotheses can be checked against ground truth.
+Built as a separate repo, `taskboard` — a small Express + React task manager, own git history, pushed to the author's own public GitHub (push commands are in the Phase 2 progress log below). 3 planted, subtle bugs: a seconds-vs-milliseconds unit mismatch in the frontend's token-refresh check (logs users out almost immediately instead of after an hour), an off-by-one in the backend's pagination offset (`page * pageSize` instead of `(page - 1) * pageSize`, so page 1 skips the first page's worth of tasks), and a stale closure in a `useEffect`-driven polling interval that doesn't depend on the filter state (so changing the status filter reverts a few seconds later). No bug is hinted at in code comments, names, or the README. The answer key — symptom, files, root cause, correct fix for each — lives at `docs/sample_bugs.md` in **this** repo, deliberately not in taskboard itself, so Duck can't read its own answer key.
 
 ## Project rules
 
@@ -150,13 +177,19 @@ A small, realistic app (Next.js or Express task manager) with 2–3 **planted, s
       main.py
       config.py             # pydantic settings, every env var
       db.py
-      models/                # SQLAlchemy async models
+      models/                # SQLAlchemy async models (incl. repo_file.py, Phase 2)
       schemas/
         events.py            # SSE event schema
+        repo.py              # repo connect/list request+response schemas (Phase 2)
       routers/
+        repos.py             # connect + list-files endpoints (Phase 2)
+        dev_tools.py         # curl-testable tool endpoints, ENABLE_DEV_TOOLS-gated (Phase 2)
       services/
         gemini_key_pool.py
-        github_client.py      # Phase 2
+        github_client.py      # tarball download + extraction/filtering (Phase 2)
+        repo_service.py       # connect/cache/refresh orchestration (Phase 2)
+        file_tools.py          # list_files/read_file/search_code (Phase 2)
+        tool_declarations.py   # Gemini FunctionDeclaration schemas (Phase 2)
         conversation_engine.py # Phase 3
       core/
         rate_limit.py
@@ -166,10 +199,16 @@ A small, realistic app (Next.js or Express task manager) with 2–3 **planted, s
     tests/
 ```
 
+```
+/mnt/d/taskboard/        # separate repo, own git history — the sample buggy app
+  backend/                # Express API, in-memory store
+  frontend/               # React + Vite UI
+```
+
 ## Phase plan
 
 1. **Scaffolding & architecture** — monorepo, Next.js + FastAPI skeletons, Neon connection, migrations for every table (including `words_spoken_count`), Gemini key pool + tests, rate limiting core, health endpoints, SSE schema, env examples.
-2. **Repo connection & smart file selection** — GitHub client (tree fetch/cache, `read_file`, `search_code`), minimal connect-a-repo endpoint, sample buggy repo goes live on GitHub with documented root causes.
+2. **Repo connection & smart file selection** — GitHub client (one-shot tarball download + extraction, not per-file fetches or code search), `list_files`/`read_file`/`search_code` tools, connect-a-repo endpoint, sample buggy repo goes live on GitHub with documented root causes.
 3. **Conversation engine** — Gemini tool-calling loop + phase state machine, wired to Phase 2's tools and the SSE schema from Phase 1, messages persisted.
 4. **Frontend chat experience & diff view** — the big dictation-first input, chat thread, phase stepper, diff viewer, SSE consumption.
 5. **Bug journal & search** — resolution summaries, Postgres full-text search, journal UI, `words_spoken_count` surfaced per-session and aggregated.
@@ -194,6 +233,20 @@ Built:
 
 Verified: `pytest` → 8/8 passing. `python -c "import app.main"` → succeeds, all routes registered. `alembic upgrade head --sql` → compiles. `npm run build` → see below.
 
-### Next: Phase 2
+### Phase 2 — complete (2026-10-22)
 
-GitHub client (`list_files` / `read_file` / `search_code`), a real repo-connect endpoint, and the sample buggy repo (author's own, 2-3 planted subtle bugs, pushed to public GitHub with documented root causes).
+Built:
+- **GitHub client** (`app/services/github_client.py`): strict public-`github.com`-only URL validation (with/without `.git`, with/without trailing slash); `fetch_repo_metadata` (1 call, also rejects private repos even if a token could see them) + `download_tarball` (1 call, follows the redirect to codeload); `extract_text_files` filters directories/lock-files/minified/binary/oversized content and rejects the whole repo over the file-count or total-byte cap before storing anything. All caps and the GitHub timeout are env vars (see `.env.example`). No per-file API calls, no code search API — exactly the pivot requested, since both are slow/rate-limited in ways that would break a live demo.
+- **`repo_files` table** (migration `0002_repo_files`): `repo_id, file_path, content, size_bytes, language, created_at`, unique on `(repo_id, file_path)`. `repos.file_tree_cache` (unused under the new approach) dropped; `repos.last_indexed_at` added to drive cache reuse/refresh.
+- **`repo_service.connect_repo`**: reuses the stored copy if `last_indexed_at` is within `REPO_CACHE_TTL_SECONDS` (default 1h), otherwise re-downloads and replaces all `repo_files` rows for that repo atomically. Dedupes by a canonicalized `https://github.com/{owner}/{repo}` URL so `.git`/trailing-slash variants of the same repo don't create duplicates.
+- **File tools** (`app/services/file_tools.py`): `list_files` / `read_file` / `search_code`, DB-backed async wrappers over DB-free pure functions (`*_pure`) for unit testability. Line-numbered `read_file` with truncation + total line count; glob/prefix matching via `fnmatch` for `list_files`; `search_code` with literal (always-safe) or regex search, a per-line length cap before regex matching, and a worker-thread + `asyncio.wait_for` timeout so a pathological pattern can't hang a request. Path-traversal strings (`..`, leading `/`, empty segments) are rejected before any DB lookup. Every tool output is capped at `TOOL_OUTPUT_MAX_CHARS`. `read_file`/`search_code` optionally take `session_id` + an `emit` callback to write `file_reads` rows and emit `tool_call` SSE events — both unused for now (no session/turn endpoint exists until Phase 3) but the call sites are ready.
+- **Gemini tool declarations** (`app/services/tool_declarations.py`): `types.FunctionDeclaration(..., parameters_json_schema={...})` for all three tools, bundled as `FILE_TOOLS` — format confirmed against the current `google-genai` SDK docs (the `parameters_json_schema` plain-dict form, not the older `types.Schema` object), ready for Phase 3's `GenerateContentConfig(tools=[FILE_TOOLS])`.
+- **Endpoints**: `POST /repos/connect`, `GET /repos/{repo_id}/files`, and dev-only `POST /dev/tools/{list_files,read_file,search_code}` — the dev router is only imported/registered in `main.py` when `ENABLE_DEV_TOOLS=true`, so it's structurally absent (not just 403'd) when that's unset.
+- **Sample buggy repo**: a separate repo at `/mnt/d/taskboard` (own git history, 4 commits, MIT licensed), Express backend + React/Vite frontend, 22 tracked files. Three planted bugs (seconds/milliseconds unit mismatch in the frontend token-expiry check, an off-by-one pagination offset on the backend, a stale-closure polling interval in a React hook) — verified by hand: ran the Express server and confirmed `GET /api/tasks?page=1` actually skips the first 5 seeded tasks; `npm run build` on the frontend succeeds. Answer key at `docs/sample_bugs.md` in **this** repo (not in taskboard, so Duck can't read its own answers).
+- Everything DB-dependent is exercised through pure functions + fixture tarballs in the default unit-test run (no network, no DB). Two integration tests are skipped by default: `test_integration_github.py` (real network, needs `RUN_GITHUB_INTEGRATION_TESTS=1` + `TASKBOARD_GITHUB_OWNER` once taskboard is pushed) and `test_integration_db.py` (real Postgres, needs `RUN_DB_INTEGRATION_TESTS=1` + a migrated `DATABASE_URL`; GitHub itself is mocked in this one so it only exercises our DB code).
+
+Verified: `pytest` → 68 passed, 2 skipped by design (the integration tests above). `alembic upgrade head --sql` → compiles (0001 + 0002). `python -c "import app.main"` → succeeds. taskboard: `npm start` (backend) + manual curl confirmed the pagination bug; `npm run build` (frontend) succeeds.
+
+### Next: Phase 3
+
+Gemini tool-calling loop wired to `FILE_TOOLS` + `file_tools.py`, the phase state machine, session/message persistence, and the real `/sessions/{id}/turn` SSE endpoint consuming the schema locked in Phase 1.
