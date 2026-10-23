@@ -59,8 +59,21 @@ def _classify_error(exc: Exception) -> int | None:
     return None
 
 
+def _is_transient(exc: Exception, status_code: int | None) -> bool:
+    """5xx (server overloaded/unavailable) and timeouts are treated the same
+    as 429 now: short cooldown on this (key, model), immediately try the next
+    key. Confirmed live during Phase 3/4 testing that these are common and
+    usually resolve on a different key within seconds — unlike a real 4xx
+    (bad request, invalid argument), which is a bug in *our* request and
+    would fail identically on every key, so it still propagates immediately."""
+    if isinstance(exc, TimeoutError):
+        return True
+    return status_code is not None and 500 <= status_code < 600
+
+
 class GeminiKeyPool:
-    """Round-robins Gemini API keys, with automatic failover on quota/auth errors.
+    """Round-robins Gemini API keys, with automatic failover on quota/auth
+    errors *and* on transient server trouble (5xx, timeouts).
 
     Every call into Gemini must go through `execute()` (or `execute_with_fallback()`)
     — never construct a `genai.Client` directly elsewhere, or failover silently stops
@@ -71,18 +84,26 @@ class GeminiKeyPool:
     each model has its own quota bucket on Google's side. This is what makes
     `execute_with_fallback` safe to retry every key again on the fallback model
     after the primary model has exhausted them all.
+
+    429/401/403 use `cooldown_seconds` (quota/auth, slower to recover). 5xx and
+    timeouts use the shorter `server_error_cooldown_seconds` — confirmed live
+    during Phase 3/4 testing that these are usually transient and a different
+    key succeeds within seconds, whereas a real 4xx (bad request) is a bug in
+    the request itself and fails identically everywhere, so it still propagates.
     """
 
     def __init__(
         self,
         keys: list[str],
         cooldown_seconds: int = 60,
+        server_error_cooldown_seconds: int = 15,
         client_factory: Callable[[str], genai.Client] | None = None,
     ) -> None:
         if not keys:
             raise ValueError("GeminiKeyPool requires at least one API key")
         self._keys = keys
         self._cooldown_seconds = cooldown_seconds
+        self._server_error_cooldown_seconds = server_error_cooldown_seconds
         self._states: dict[tuple[int, str], _KeyState] = {}
         self._clients: dict[int, genai.Client] = {}
         self._next_index = 0
@@ -155,7 +176,20 @@ class GeminiKeyPool:
                     last_error = exc
                     continue
 
-                # Not a quota/auth error — this is a real failure, not pool business. Surface it.
+                if _is_transient(exc, status_code):
+                    async with self._lock:
+                        state = self._state_for(index, model)
+                        state.status = KeyStatus.cooling
+                        state.cooldown_until = time.monotonic() + self._server_error_cooldown_seconds
+                    logger.warning(
+                        "gemini key_index=%d model=%s transient error (code=%s, %s), cooling down %ds",
+                        index, model, status_code, type(exc).__name__, self._server_error_cooldown_seconds,
+                    )
+                    last_error = exc
+                    continue
+
+                # Not a quota/auth/transient error — a real failure (e.g. bad request),
+                # not pool business, and would fail identically on every key. Surface it.
                 raise
 
             logger.info("gemini request succeeded using key_index=%d model=%s", index, model)
@@ -205,5 +239,6 @@ def get_gemini_key_pool() -> GeminiKeyPool:
         _pool = GeminiKeyPool(
             keys=settings.gemini_api_keys_list,
             cooldown_seconds=settings.gemini_key_cooldown_seconds,
+            server_error_cooldown_seconds=settings.gemini_server_error_cooldown_seconds,
         )
     return _pool

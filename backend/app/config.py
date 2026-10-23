@@ -21,14 +21,33 @@ class Settings(BaseSettings):
     gemini_fallback_model: str = "gemini-3.6-flash"
     gemini_api_keys: str = ""
     gemini_key_cooldown_seconds: int = 60
+    # Shorter cooldown for 5xx/timeout than for 429/401/403 — these are usually
+    # transient (confirmed live: a different key often succeeds within seconds)
+    # rather than a real quota/auth problem, so there's no reason to wait as long
+    # before trying this (key, model) again.
+    gemini_server_error_cooldown_seconds: int = 15
     gemini_daily_call_cap: int = 500
-    # Wall-clock budget for a single generate_content call (one key, one model attempt).
-    # Generous because the full 7-tool schema measurably adds latency over a bare call.
-    gemini_call_timeout_seconds: float = 45.0
+    # Wall-clock budget for a single generate_content call (one key, one model
+    # attempt). Lowered from 45s so a hung call fails over to the next key
+    # quickly instead of blocking the whole turn — a hang now costs at most
+    # this long per key tried, not the old 45s.
+    gemini_call_timeout_seconds: float = 25.0
     # Older tool results beyond this many most-recent ones get their bulky payload
     # replaced with a short placeholder before the next Gemini call, so long
     # sessions don't blow up context size or cost.
     gemini_context_keep_recent_tool_results: int = 6
+
+    # Gemini 3.x models "think" before responding, which measurably adds latency
+    # on every call — both gemini-3.8-flash and gemini-3.6-flash default to MEDIUM.
+    # The investigating-phase tool-calling loop (list_files/read_file/search_code,
+    # mostly mechanical orchestration) runs at this lower level for speed.
+    gemini_thinking_level: str = "LOW"
+    # Used instead of gemini_thinking_level once a session is past pure
+    # investigation (hypothesis/fix_proposed/resolved) — few calls, but each one
+    # (stating the root cause, picking exact line numbers for propose_fix,
+    # writing the resolution summary) is precision-sensitive enough to be worth
+    # the extra latency. See CLAUDE.md "Conversation engine" for the tradeoff.
+    gemini_hypothesis_thinking_level: str = "MEDIUM"
 
     # GitHub (read-only access to public repos). Used automatically if set;
     # falls back to the unauthenticated 60/hr rate limit if empty.

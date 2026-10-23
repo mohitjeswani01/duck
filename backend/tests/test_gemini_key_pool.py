@@ -9,10 +9,17 @@ class FakeAPIError(Exception):
         super().__init__(f"fake gemini error code={code}")
 
 
-def make_pool(keys: list[str] = None, cooldown_seconds: int = 60) -> GeminiKeyPool:
+def make_pool(
+    keys: list[str] = None, cooldown_seconds: int = 60, server_error_cooldown_seconds: int = 15
+) -> GeminiKeyPool:
     keys = keys or ["key-0", "key-1", "key-2"]
     # Fake client is just the key string itself — enough to identify which key served a call.
-    return GeminiKeyPool(keys=keys, cooldown_seconds=cooldown_seconds, client_factory=lambda api_key: api_key)
+    return GeminiKeyPool(
+        keys=keys,
+        cooldown_seconds=cooldown_seconds,
+        server_error_cooldown_seconds=server_error_cooldown_seconds,
+        client_factory=lambda api_key: api_key,
+    )
 
 
 async def test_round_robin_distributes_across_keys():
@@ -143,3 +150,108 @@ async def test_execute_with_fallback_raises_when_both_models_exhausted():
 
     with pytest.raises(GeminiAllKeysExhaustedError):
         await pool.execute_with_fallback(always_rate_limited, primary_model="primary", fallback_model="fallback")
+
+
+async def test_failover_on_503_cools_down_key_and_retries_next():
+    pool = make_pool()
+
+    async def op(client: str) -> str:
+        if client == "key-0":
+            raise FakeAPIError(503)
+        return client
+
+    result = await pool.execute(op)
+
+    assert result == "key-1"
+    health = await pool.health()
+    assert health[0].status == KeyStatus.cooling
+    assert health[0].cooldown_remaining_seconds > 0
+
+
+async def test_failover_on_504_cools_down_key_and_retries_next():
+    pool = make_pool()
+
+    async def op(client: str) -> str:
+        if client == "key-0":
+            raise FakeAPIError(504)
+        return client
+
+    result = await pool.execute(op)
+
+    assert result == "key-1"
+    health = await pool.health()
+    assert health[0].status == KeyStatus.cooling
+
+
+async def test_failover_on_timeout_cools_down_key_and_retries_next():
+    pool = make_pool()
+
+    async def op(client: str) -> str:
+        if client == "key-0":
+            raise TimeoutError("call timed out")
+        return client
+
+    result = await pool.execute(op)
+
+    assert result == "key-1"
+    health = await pool.health()
+    assert health[0].status == KeyStatus.cooling
+    assert health[0].cooldown_remaining_seconds > 0
+
+
+async def test_server_error_cooldown_is_independent_of_quota_cooldown():
+    # Quota cooldown set very long, server-error cooldown set very short —
+    # proves a 503 uses the short one, not the 429 one.
+    pool = make_pool(cooldown_seconds=600, server_error_cooldown_seconds=1)
+
+    async def op(client: str) -> str:
+        if client == "key-0":
+            raise FakeAPIError(503)
+        return client
+
+    await pool.execute(op)
+
+    health = await pool.health()
+    assert health[0].cooldown_remaining_seconds <= 1
+
+
+async def test_all_keys_exhausted_on_5xx_raises_friendly_error():
+    pool = make_pool(keys=["key-0", "key-1"])
+
+    async def always_unavailable(client: str) -> str:
+        raise FakeAPIError(503)
+
+    with pytest.raises(GeminiAllKeysExhaustedError):
+        await pool.execute(always_unavailable)
+
+    health = await pool.health()
+    assert all(entry.status == KeyStatus.cooling for entry in health)
+
+
+async def test_all_keys_exhausted_on_timeout_raises_friendly_error():
+    pool = make_pool(keys=["key-0", "key-1"])
+
+    async def always_times_out(client: str) -> str:
+        raise TimeoutError("call timed out")
+
+    with pytest.raises(GeminiAllKeysExhaustedError):
+        await pool.execute(always_times_out)
+
+    health = await pool.health()
+    assert all(entry.status == KeyStatus.cooling for entry in health)
+
+
+async def test_400_bad_request_still_propagates_immediately():
+    # A real 4xx (bug in our own request) fails identically on every key —
+    # must NOT be treated as transient, or we'd burn the whole pool retrying
+    # something that can never succeed.
+    pool = make_pool()
+
+    async def op(client: str) -> str:
+        raise FakeAPIError(400)
+
+    with pytest.raises(FakeAPIError):
+        await pool.execute(op)
+
+    health = await pool.health()
+    assert all(entry.status == KeyStatus.healthy for entry in health)

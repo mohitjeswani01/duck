@@ -154,6 +154,21 @@ def _compact_old_tool_results(contents: list[types.Content], keep_recent: int) -
             }
 
 
+def _thinking_level_for_phase(settings: Settings, phase: SessionPhase) -> types.ThinkingLevel:
+    """LOW during investigating (the bulk of calls — mechanical tool
+    orchestration); the configured higher level everywhere past it, since
+    those calls are few but precision-sensitive (the hypothesis itself,
+    propose_fix's exact line numbers, the resolution summary). Note the
+    state_hypothesis call itself still runs at the lower level — phase only
+    flips to "hypothesis" *after* that tool call is dispatched, so the backend
+    can't know in advance which tool a given call will choose. See CLAUDE.md
+    for why this tradeoff was accepted rather than adding a prediction step."""
+    level_name = (
+        settings.gemini_thinking_level if phase == SessionPhase.investigating else settings.gemini_hypothesis_thinking_level
+    )
+    return types.ThinkingLevel[level_name]
+
+
 async def _call_gemini(
     pool: GeminiKeyPool,
     settings: Settings,
@@ -184,7 +199,10 @@ async def _force_wrap_up(pool, settings, engine_state, system_instruction) -> st
         ],
     )
     contents = engine_state.gemini_contents + [wrap_up]
-    config = types.GenerateContentConfig(system_instruction=system_instruction)
+    config = types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel[settings.gemini_thinking_level]),
+    )
 
     response = await _call_gemini(pool, settings, contents, config)
     engine_state.gemini_contents.append(wrap_up)
@@ -215,6 +233,7 @@ async def _run_gemini_loop(
             tools=[ALL_TOOLS],
             system_instruction=system_instruction,
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            thinking_config=types.ThinkingConfig(thinking_level=_thinking_level_for_phase(settings, session.current_phase)),
         )
 
         # Counted before the call completes, not after — a failed/timed-out attempt
