@@ -239,6 +239,15 @@ async def _load_repo_files(db: AsyncSession, repo_id: uuid.UUID) -> list[StoredF
     ]
 
 
+async def get_raw_file_content(db: AsyncSession, repo_id: uuid.UUID, path: str) -> str | None:
+    """The exact, un-numbered, untruncated file content — used by propose_fix
+    to build a real diff, as opposed to read_file's display-formatted output."""
+    _validate_relative_path(path)
+    files = await _load_repo_files(db, repo_id)
+    match = next((f for f in files if f.path == path), None)
+    return match.content if match is not None else None
+
+
 async def _record_file_read(db: AsyncSession, session_id: uuid.UUID, path: str, reason: str) -> None:
     db.add(FileRead(session_id=session_id, file_path=path, reason=reason))
     await db.commit()

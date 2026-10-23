@@ -16,9 +16,19 @@ class Settings(BaseSettings):
 
     # Gemini
     gemini_model: str = "gemini-flash-latest"
+    # Tried on every key only after every key is exhausted/cooling for the primary
+    # model — a separate quota bucket, so a model-wide outage doesn't take Duck down.
+    gemini_fallback_model: str = "gemini-3.6-flash"
     gemini_api_keys: str = ""
     gemini_key_cooldown_seconds: int = 60
     gemini_daily_call_cap: int = 500
+    # Wall-clock budget for a single generate_content call (one key, one model attempt).
+    # Generous because the full 7-tool schema measurably adds latency over a bare call.
+    gemini_call_timeout_seconds: float = 45.0
+    # Older tool results beyond this many most-recent ones get their bulky payload
+    # replaced with a short placeholder before the next Gemini call, so long
+    # sessions don't blow up context size or cost.
+    gemini_context_keep_recent_tool_results: int = 6
 
     # GitHub (read-only access to public repos). Used automatically if set;
     # falls back to the unauthenticated 60/hr rate limit if empty.
@@ -49,7 +59,17 @@ class Settings(BaseSettings):
     # Abuse protection
     rate_limit_sessions_per_ip_per_hour: int = 5
     rate_limit_messages_per_session: int = 40
-    max_tool_calls_per_session: int = 15
+    # Phase 3 clarified this is per *turn* (one user message's worth of Gemini
+    # back-and-forth), not per session — renamed from max_tool_calls_per_session.
+    max_tool_calls_per_turn: int = 15
+
+    # Conversation engine (Phase 3)
+    max_clarifying_rounds: int = 2
+    min_questions_per_round: int = 1
+    max_questions_per_round: int = 3
+    # In-memory per-session SSE queue depth — fine since Render's free tier is a
+    # single instance; see CLAUDE.md "Conversation engine" for the tradeoff.
+    session_event_queue_max_size: int = 200
 
     @property
     def gemini_api_keys_list(self) -> list[str]:

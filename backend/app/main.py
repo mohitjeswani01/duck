@@ -4,7 +4,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.config import get_settings
 from app.core.rate_limit import friendly_rate_limit_handler, limiter
-from app.routers import admin, health, repos
+from app.routers import admin, health, repos, sessions
 
 settings = get_settings()
 
@@ -24,6 +24,7 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(admin.router)
 app.include_router(repos.router)
+app.include_router(sessions.router)
 
 if settings.enable_dev_tools:
     from app.routers import dev_tools

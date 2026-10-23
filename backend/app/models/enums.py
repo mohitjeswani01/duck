@@ -19,3 +19,9 @@ class SessionPhase(str, enum.Enum):
 class MessageRole(str, enum.Enum):
     user = "user"
     assistant = "assistant"
+
+
+class HypothesisConfidence(str, enum.Enum):
+    low = "low"
+    medium = "medium"
+    high = "high"

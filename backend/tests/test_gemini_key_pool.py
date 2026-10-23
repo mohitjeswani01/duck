@@ -90,3 +90,56 @@ async def test_non_quota_error_propagates_without_consuming_pool_state():
 
     health = await pool.health()
     assert all(entry.status == KeyStatus.healthy for entry in health)
+
+
+async def test_cooldown_on_one_model_does_not_affect_another_model():
+    pool = make_pool(keys=["key-0", "key-1"])
+
+    async def rate_limited_on_primary_only(client: str) -> str:
+        raise FakeAPIError(429)
+
+    with pytest.raises(GeminiAllKeysExhaustedError):
+        await pool.execute(rate_limited_on_primary_only, model="primary")
+
+    primary_health = await pool.health("primary")
+    assert all(entry.status == KeyStatus.cooling for entry in primary_health)
+
+    # Same keys, different model bucket — nothing cooling here yet.
+    fallback_health = await pool.health("fallback")
+    assert all(entry.status == KeyStatus.healthy for entry in fallback_health)
+
+    async def op(client: str) -> str:
+        return client
+
+    result = await pool.execute(op, model="fallback")
+    assert result in ("key-0", "key-1")
+
+
+async def test_execute_with_fallback_retries_every_key_on_fallback_model():
+    pool = make_pool(keys=["key-0", "key-1"])
+    calls: list[tuple[str, str]] = []
+
+    async def op(client: str, model: str) -> str:
+        calls.append((client, model))
+        if model == "primary":
+            raise FakeAPIError(429)
+        return f"{client}-via-{model}"
+
+    result = await pool.execute_with_fallback(op, primary_model="primary", fallback_model="fallback")
+
+    assert result.endswith("-via-fallback")
+    # Both keys should have been tried on the primary model before falling back.
+    assert {c for c, m in calls if m == "primary"} == {"key-0", "key-1"}
+
+    primary_health = await pool.health("primary")
+    assert all(entry.status == KeyStatus.cooling for entry in primary_health)
+
+
+async def test_execute_with_fallback_raises_when_both_models_exhausted():
+    pool = make_pool(keys=["key-0", "key-1"])
+
+    async def always_rate_limited(client: str, model: str) -> str:
+        raise FakeAPIError(429)
+
+    with pytest.raises(GeminiAllKeysExhaustedError):
+        await pool.execute_with_fallback(always_rate_limited, primary_model="primary", fallback_model="fallback")
