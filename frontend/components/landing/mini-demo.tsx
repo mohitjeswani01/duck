@@ -90,8 +90,8 @@ export function MiniDemo() {
         )}
       </div>
 
-      <div className="flex min-h-36 flex-col gap-2">
-        <AnimatePresence mode="popLayout">
+      <div className="flex h-[232px] flex-col gap-2 overflow-hidden">
+        <AnimatePresence>
           {BEATS.slice(0, visibleBeats).map((beat, i) => (
             <motion.div
               key={i}

@@ -10,6 +10,8 @@ import { DuckMascot } from "@/components/duck/duck-mascot";
 import { useSessionStream } from "@/hooks/use-session-stream";
 import { useSlowRequestNotice } from "@/hooks/use-slow-request-notice";
 import { latestFixBatch } from "@/lib/utils";
+import { speak, stopSpeaking } from "@/lib/speech";
+import { TASKBOARD_GITHUB_URL } from "@/lib/constants";
 import { getSession, getRepo, sendMessage, acceptFix, rejectFix, ApiError, type SessionStateResponse, type RepoOut } from "@/lib/api";
 import type { DuckEvent, ToolCallEvent } from "@/lib/events";
 
@@ -39,6 +41,38 @@ export function WorkspaceClient({ sessionId }: { sessionId: string }) {
   // interval's effect can start, so the placeholder value is never read.
   const lastEventAtRef = useRef(0);
   const wakingUp = useSlowRequestNotice(initialLoading);
+  const isSampleRepo = repo?.name?.toLowerCase() === "taskboard" || repo?.github_url === TASKBOARD_GITHUB_URL;
+
+  // null means "not yet hydrated" — on first load we record the starting
+  // message count without speaking anything (a page refresh shouldn't replay
+  // the whole conversation out loud).
+  const lastSpokenCountRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!session) return;
+    if (lastSpokenCountRef.current === null) {
+      lastSpokenCountRef.current = session.messages.length;
+      return;
+    }
+    const newMessages = session.messages.slice(lastSpokenCountRef.current);
+    lastSpokenCountRef.current = session.messages.length;
+    if (!soundEnabled) return;
+    for (const m of newMessages) {
+      if (m.role !== "assistant") continue;
+      if (m.phase_at_time === "clarifying") {
+        speak(m.content);
+      } else if (m.phase_at_time === "hypothesis") {
+        speak("I think I found it. Check the hypothesis card.");
+      } else if (m.phase_at_time === "resolved") {
+        speak(session.resolution_summary ?? "Bug resolved.");
+      }
+    }
+  }, [session, soundEnabled]);
+
+  function handleSoundChange(value: boolean) {
+    if (!value) stopSpeaking();
+    setSoundEnabled(value);
+  }
 
   const refreshSession = useCallback(async () => {
     try {
@@ -125,6 +159,7 @@ export function WorkspaceClient({ sessionId }: { sessionId: string }) {
 
   async function handleSendMessage(text: string) {
     if (!session) return;
+    stopSpeaking();
     beginTurn("Duck is thinking…");
     const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
     setSession((s) =>
@@ -202,9 +237,11 @@ export function WorkspaceClient({ sessionId }: { sessionId: string }) {
         repoOwner={repo?.owner}
         repoName={repo?.name}
         githubUrl={repo?.github_url}
+        isSampleRepo={isSampleRepo}
         phase={session.current_phase}
+        messages={session.messages}
         soundEnabled={soundEnabled}
-        onSoundChange={setSoundEnabled}
+        onSoundChange={handleSoundChange}
       />
 
       <div className="px-4 pt-3 sm:px-6">

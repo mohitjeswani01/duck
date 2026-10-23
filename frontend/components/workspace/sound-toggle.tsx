@@ -36,8 +36,8 @@ export function SoundToggle({ enabled, onChange }: { enabled: boolean; onChange:
       type="button"
       onClick={() => onChange(!enabled)}
       aria-pressed={enabled}
-      aria-label={enabled ? "Mute Duck's quack" : "Unmute Duck's quack"}
-      title={enabled ? "Quack sound on" : "Quack sound off"}
+      aria-label={enabled ? "Turn off Duck's voice" : "Let Duck talk"}
+      title={enabled ? "Duck will talk and quack" : "Let Duck talk"}
       className="press-down inline-flex size-8 items-center justify-center rounded-full border-2 border-ink bg-paper shadow-brutal-sm"
     >
       {enabled ? <Volume2 className="size-4" aria-hidden /> : <VolumeX className="size-4" aria-hidden />}

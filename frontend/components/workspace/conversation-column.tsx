@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { MessageSquareText } from "lucide-react";
+import Link from "next/link";
+import { Home, MessageSquareText, RotateCcw } from "lucide-react";
 import { MessageBubble } from "@/components/workspace/message-bubble";
 import { WisprInput } from "@/components/duck/wispr-input";
 import type { MessageOut } from "@/lib/api";
@@ -45,9 +46,25 @@ export function ConversationColumn({ messages, onSendMessage, busy, statusText, 
         </div>
 
         {resolved ? (
-          <p className="rounded-xl border-2 border-ink bg-duck-soft px-4 py-3 text-sm font-semibold">
-            This bug is resolved. Start a new session from the home page for a different one.
-          </p>
+          <div className="flex flex-col gap-3 rounded-xl border-2 border-ink bg-duck-soft px-4 py-3">
+            <p className="text-sm font-semibold">This bug is resolved — nice work.</p>
+            <div className="flex flex-wrap gap-2">
+              <Link
+                href="/#try-a-bug"
+                className="press-down inline-flex items-center gap-1.5 rounded-full border-2 border-ink bg-ink px-3.5 py-1.5 text-sm font-bold text-cream shadow-brutal-sm"
+              >
+                <RotateCcw className="size-3.5" aria-hidden />
+                Try another bug
+              </Link>
+              <Link
+                href="/"
+                className="press-down inline-flex items-center gap-1.5 rounded-full border-2 border-ink bg-paper px-3.5 py-1.5 text-sm font-bold shadow-brutal-sm"
+              >
+                <Home className="size-3.5" aria-hidden />
+                Back to home
+              </Link>
+            </div>
+          </div>
         ) : (
           <WisprInput
             onSubmit={onSendMessage}

@@ -1,19 +1,13 @@
 export function WhyVoice() {
   return (
-    <section className="flex flex-col gap-4 rounded-xl border-2 border-ink bg-duck-soft/50 p-6 py-12 sm:p-10">
+    <section id="why-voice" className="flex flex-col gap-4 rounded-xl border-2 border-ink bg-duck-soft/50 p-6 py-12 sm:p-10">
       <h2 className="font-heading text-2xl font-bold sm:text-3xl">Why voice?</h2>
-      <div className="grid gap-6 sm:grid-cols-2">
-        <p className="text-ink/80">
-          Rubber duck debugging works: saying a bug out loud, in order, forces the clarity that finds it. The problem
-          is typing it all out is slow enough that the technique gets skipped under deadline pressure — right when
-          it would help most.
-        </p>
-        <p className="text-ink/80">
-          Speaking is faster than typing, and it&apos;s harder to skip the details when you&apos;re narrating instead
-          of summarizing. Wispr Flow makes the dictation itself invisible, so the only thing left to do is talk —
-          Duck listens, reads through the mangled transcription, and gets to work.
-        </p>
-      </div>
+      <p className="max-w-3xl text-ink/80">
+        Developers have been told for twenty years to explain their bugs out loud to a rubber duck — saying it in
+        order, to something that can&apos;t interrupt, forces the clarity that finds it. Nobody actually does it,
+        because typing out a full explanation is slower than just staring at the code some more. Duck is the first
+        duck that talks back — so the rubber duck technique finally has a reason to happen.
+      </p>
     </section>
   );
 }

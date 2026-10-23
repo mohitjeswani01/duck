@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect } from "react";
+import Link from "next/link";
 import { motion } from "framer-motion";
-import { PartyPopper, Tag } from "lucide-react";
+import { Home, PartyPopper, RotateCcw, Tag } from "lucide-react";
 import { DuckMascot } from "@/components/duck/duck-mascot";
 import { playQuack } from "@/lib/quack";
 
@@ -48,6 +49,23 @@ export function ResolvedCard({ resolutionSummary, rootCause, tags, soundEnabled 
           ))}
         </div>
       )}
+
+      <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
+        <Link
+          href="/#try-a-bug"
+          className="press-down inline-flex items-center gap-1.5 rounded-full border-2 border-ink bg-ink px-3.5 py-1.5 text-sm font-bold text-cream shadow-brutal-sm"
+        >
+          <RotateCcw className="size-3.5" aria-hidden />
+          Try another bug
+        </Link>
+        <Link
+          href="/"
+          className="press-down inline-flex items-center gap-1.5 rounded-full border-2 border-ink bg-paper px-3.5 py-1.5 text-sm font-bold shadow-brutal-sm"
+        >
+          <Home className="size-3.5" aria-hidden />
+          Back to home
+        </Link>
+      </div>
     </motion.div>
   );
 }

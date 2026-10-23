@@ -3,7 +3,7 @@ import { DuckMascot } from "@/components/duck/duck-mascot";
 
 export function Hero() {
   return (
-    <section className="grid grid-cols-1 items-center gap-10 py-12 sm:py-16 lg:grid-cols-2 lg:gap-16">
+    <section id="hero" className="grid grid-cols-1 items-center gap-10 py-12 sm:py-16 lg:grid-cols-2 lg:gap-16">
       <div className="flex flex-col gap-6">
         <div className="inline-flex items-center gap-2 self-start rounded-full border-2 border-ink bg-paper px-3 py-1 text-xs font-bold shadow-brutal-sm">
           <DuckMascot mood="idle" size={20} />

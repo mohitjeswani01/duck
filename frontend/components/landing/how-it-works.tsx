@@ -20,7 +20,7 @@ const STEPS = [
 
 export function HowItWorks() {
   return (
-    <section className="flex flex-col gap-8 py-12">
+    <section id="how-it-works" className="flex flex-col gap-8 py-12">
       <h2 className="font-heading text-2xl font-bold sm:text-3xl">How it works</h2>
       <div className="grid grid-cols-1 gap-5 sm:grid-cols-3">
         {STEPS.map((step, i) => (

@@ -74,12 +74,12 @@ export function DuckMascot({ mood = "idle", size = 64, className }: DuckMascotPr
               ? { rotate: [0, -3, 0, 3, 0] }
               : {}
         }
-        transition={reduceMotion ? { duration: 0 } : { duration: 0.9, repeat: Infinity, ease: "easeInOut" }}
+        transition={reduceMotion ? { duration: 0 } : { duration: 0.9, repeat: 2, ease: "easeInOut" }}
         style={{ transformOrigin: "50px 70px" }}
       >
         <ellipse cx="50" cy="72" rx="27" ry="21" fill="var(--color-duck)" stroke="var(--color-ink)" strokeWidth="3.5" />
 
-        {/* wings */}
+        {/* wings — a brief happy flap on resolve, not a perpetual loop */}
         <motion.path
           d="M 27 68 Q 18 72 23 84"
           fill="none"
@@ -87,7 +87,7 @@ export function DuckMascot({ mood = "idle", size = 64, className }: DuckMascotPr
           strokeWidth="3"
           strokeLinecap="round"
           animate={reduceMotion ? {} : mood === "resolved" ? { rotate: [0, -18, 0] } : {}}
-          transition={reduceMotion ? { duration: 0 } : { duration: 0.45, repeat: Infinity, ease: "easeInOut" }}
+          transition={reduceMotion ? { duration: 0 } : { duration: 0.45, repeat: 2, ease: "easeInOut" }}
           style={{ transformOrigin: "27px 68px" }}
         />
         <motion.path
@@ -97,7 +97,7 @@ export function DuckMascot({ mood = "idle", size = 64, className }: DuckMascotPr
           strokeWidth="3"
           strokeLinecap="round"
           animate={reduceMotion ? {} : mood === "resolved" ? { rotate: [0, 18, 0] } : {}}
-          transition={reduceMotion ? { duration: 0 } : { duration: 0.45, repeat: Infinity, ease: "easeInOut" }}
+          transition={reduceMotion ? { duration: 0 } : { duration: 0.45, repeat: 2, ease: "easeInOut" }}
           style={{ transformOrigin: "73px 68px" }}
         />
       </motion.g>
@@ -196,7 +196,9 @@ export function DuckMascot({ mood = "idle", size = 64, className }: DuckMascotPr
         )}
       </AnimatePresence>
 
-      {/* confetti — resolved */}
+      {/* confetti — a one-shot burst on resolve, not a perpetual loop (a
+          looping burst means a screenshot can land mid-flight and catch an
+          isolated particle, reading as a stray stray dot next to the duck) */}
       <AnimatePresence>
         {mood === "resolved" &&
           !reduceMotion &&
@@ -217,7 +219,7 @@ export function DuckMascot({ mood = "idle", size = 64, className }: DuckMascotPr
                   y: 40 + Math.sin(angle) * 48,
                   rotate: 180,
                 }}
-                transition={{ duration: 1.1, repeat: Infinity, repeatDelay: 0.6, delay: i * 0.03 }}
+                transition={{ duration: 1.1, delay: i * 0.03 }}
               />
             );
           })}
