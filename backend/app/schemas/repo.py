@@ -28,3 +28,12 @@ class RepoFileOut(BaseModel):
     size_bytes: int
     language: str
     created_at: datetime
+
+
+class RepoFileContentOut(BaseModel):
+    """Phase 4 — the frontend's hypothesis evidence chips need to show a code
+    snippet when clicked; nothing previously exposed raw file content."""
+
+    path: str
+    content: str
+    total_lines: int

@@ -216,7 +216,26 @@ The Gemini tool-calling loop lives in `app/services/conversation_engine.py`, run
 /mnt/d/duck/
   CLAUDE.md
   .gitignore
-  frontend/            # Next.js, TS, Tailwind, shadcn
+  frontend/            # Next.js 16 (App Router), TS, Tailwind v4, shadcn ("base-nova"/@base-ui)
+    app/
+      layout.tsx         # fonts (Bricolage Grotesque/Inter/JetBrains Mono), metadata, OG, viewport
+      page.tsx            # landing page (client component)
+      globals.css          # design tokens: palette, fonts, neo-brutalist shadows (Phase 4)
+      icon.svg              # favicon — the duck mascot face (Phase 4)
+      opengraph-image.tsx    # programmatic OG card via next/og ImageResponse (Phase 4)
+      workspace/[id]/page.tsx # dynamic session route, instant=false (Cache Components opt-out)
+    components/
+      duck/                # duck-mascot.tsx (mood variants), wispr-input.tsx, error-banner.tsx
+      landing/             # hero, mini-demo (scripted, no API calls), bug-picker, how-it-works, why-voice
+      workspace/            # top-bar, phase-stepper, conversation/investigation columns, hypothesis/diff/resolved cards
+      ui/                    # card, badge, chip, textarea/input — neo-brutalist primitives
+    hooks/                  # use-session-stream (SSE+reconnect), use-reduced-motion, use-slow-request-notice
+    lib/
+      api.ts                 # typed client mirroring every backend schema (Phase 4)
+      events.ts               # SSE event types, mirrors backend/app/schemas/events.py (Phase 1)
+      quack.ts                 # synthesized quack sound, Web Audio API (Phase 4)
+    scripts/
+      capture-screenshots.mjs  # Playwright: real e2e session + screenshots (Phase 4)
   backend/
     app/
       main.py
@@ -225,10 +244,10 @@ The Gemini tool-calling loop lives in `app/services/conversation_engine.py`, run
       models/                # SQLAlchemy async models (incl. repo_file.py Phase 2, hypothesis.confidence Phase 3)
       schemas/
         events.py            # SSE event schema
-        repo.py              # repo connect/list request+response schemas (Phase 2)
+        repo.py              # repo connect/list/file-content schemas (Phase 2, file-content Phase 4)
         session.py            # session create/message/fix-decision/state schemas (Phase 3)
       routers/
-        repos.py             # connect + list-files endpoints (Phase 2)
+        repos.py             # connect/list-files/get-repo/file-content endpoints (Phase 2, Phase 4 additions)
         dev_tools.py         # curl-testable tool endpoints, ENABLE_DEV_TOOLS-gated (Phase 2)
         sessions.py           # create/stream/message/accept/reject/get-state (Phase 3)
       services/
@@ -340,6 +359,35 @@ Budget: 9 calls (benchmark) + 23 calls (first full 3-bug eval) + 9 calls (auth-e
 
 Verified: `pytest` → 99 passed, 2 skipped by design, unchanged after all hardening-phase edits.
 
-### Next: Phase 4
+### Phase 4 — complete (2026-10-23)
 
-Frontend chat experience: the big dictation-first textarea, the chat thread consuming `GET /sessions/{id}/stream`, the phase stepper, the diff viewer wired to `POST /sessions/{id}/fixes/{fix_id}/accept|reject`, and `POST /sessions` + `/sessions/{id}/messages` driving it all from the UI.
+The frontend. Backend was done and proven (Phase 3 + hardening resolved all three taskboard bugs); this phase had to make Duck *look* like a real product, not a hackathon demo.
+
+**Design system** (`app/globals.css`, additive `@theme` block layered on top of the existing shadcn/Tailwind-v4 CSS-variable theme, not replacing it): warm cream (`--color-cream` `#fbf7ee`) background, near-black ink (`--color-ink` `#211d16`) text/borders, duck-yellow (`--color-duck` `#ffc93c`) as the signature accent, beak-orange (`--color-beak` `#ff7a3d`) used sparingly, and dedicated `--color-diff-add`/`--color-diff-remove` pairs reserved *only* for the diff viewer — green/red never appear anywhere else in the UI. Fonts via `next/font/google`: Bricolage Grotesque for headings, Inter for body, JetBrains Mono for code/paths/line numbers, bound to CSS vars consumed by `--font-heading`/`--font-sans`/`--font-mono` theme tokens. Neo-brutalist shadows (`--shadow-brutal`, `-sm`, `-lg`: hard 2-6px ink offsets, zero blur) and a shared `.press-down` utility (translate + drop shadow on `:active`) used by every button/card/chip. Existing shadcn `Button` component restyled in place (2px ink borders, brutal shadows) rather than replaced, keeping `@base-ui/react` underneath.
+
+**Duck mascot** (`components/duck/duck-mascot.tsx`): one SVG, six moods (`idle`/`listening`/`investigating`/`thinking`/`hypothesis`/`resolved`) as `framer-motion`-animated layers on the same base shape — head tilt (listening), reading glasses that fade in (investigating), a thought bubble with three staggered-pulse dots (thinking), wide eyes + a popping lightbulb (hypothesis), and wing-flap + outward confetti particles (resolved). All built from primitive SVG shapes (ellipses, circles, paths) — not modeled on any existing character. `useReducedMotion()` (via `useSyncExternalStore` on `matchMedia`) drops every animation to a static pose. Used as a small avatar next to every Duck message, a large mood-reactive header in the investigation panel, and the favicon (`app/icon.svg`, a static version of the idle pose).
+
+**Landing page** (`components/landing/*`): hero with the "Out loud." highlight in duck-yellow, a **scripted, non-API** mini-demo card (`mini-demo.tsx`) that types out a bug description and reveals tool-call/hypothesis/diff beats on a loop via `setTimeout` chains, cancelled/reduced under `prefers-reduced-motion`. "Try it on a real bug" (`bug-picker.tsx`) — three chips with the exact symptom text from `docs/sample_bugs.md`, pagination first per instructions (fastest/most reliable); clicking one calls `connectRepo` → `createSession` → `router.push` with zero typing. A "bring your own repo" path connects first, then reveals an inline `WisprInput` for the first message before creating the session (the backend requires repo_id + first message together — there's no "connected, no bug yet" session state, so the UI holds that gap itself). How-it-works and why-voice sections are static copy.
+
+**Workspace** (`app/workspace/[id]/page.tsx` → `components/workspace/workspace-client.tsx`): a thin server wrapper (unwraps the route param, sets `instant = false` since every session id is unique and nothing here is prerenderable) around a fully client-rendered orchestrator. Top bar: logo, repo name linked to GitHub (fetched via the new `GET /repos/{id}`), animated phase stepper, sound toggle. Two-column layout (conversation | investigation), stacking on mobile with the investigation column collapsible via a `lg:pointer-events-none` toggle button that's inert on desktop. Conversation renders `messages` from `GET /sessions/{id}`, with `clarifying`-phase assistant messages rendered as a distinct numbered `QuestionCard`. Investigation renders the live SSE trace (`tool_call` events, never persisted — see below), the latest `HypothesisCard` with clickable file:line evidence chips opening a `CodeSnippetViewer` modal (needed the new `GET /repos/{id}/file-content` endpoint), a hand-rolled unified-diff parser/renderer (`diff-viewer.tsx`) with real line numbers and add/remove coloring, `FixDecision` (Accept / "This doesn't fix it" with optional feedback), and a confetti `ResolvedCard` that plays the synthesized quack (`lib/quack.ts`, Web Audio oscillators — no audio asset to license) if the sound toggle is on.
+
+**State model**: `tool_call` SSE events aren't persisted anywhere in the backend (no endpoint exposes `file_reads`), so the live trace is necessarily ephemeral per page visit — a refresh loses the blow-by-blow trace but not the durable conversation/hypothesis/fix state, which `GET /sessions/{id}` always fully reconstructs. Every other event type (`phase`/`assistant_message`/`diff`/`done`) triggers a full `refreshSession()` rather than hand-reconciling partial state client-side — simpler and correctness-guaranteed at the cost of a few extra cheap GETs per turn. `useSessionStream` detects a dropped `EventSource` (native `onerror`) and calls `onReconnect` (→ `refreshSession`) the next time it reopens, satisfying "reconnect automatically and reload session state."
+
+**Wispr input** (`components/duck/wispr-input.tsx`): large auto-focused textarea, live word count, ⌘/Ctrl+Enter sends immediately. Burst detection: any single `onChange` that adds ≥15 characters in one event (Wispr Flow's paste-on-stop-talking behavior, vs. character-by-character typing) arms a 2-second pause timer; if nothing else arrives, a 3-second cancellable auto-send countdown appears. Toggle persisted via `useSyncExternalStore` over `localStorage`.
+
+**Loading/errors**: `useSlowRequestNotice(active, delayMs)` flips true only after `active` has held for `delayMs`, driving "Waking Duck up" on both the landing page's connect flow and the workspace's initial load — distinguishes "merely slow" from "frozen." A 15-second no-activity timer during a busy turn escalates the status line to "Duck is thinking really hard about this one." All backend errors surface through one `ErrorBanner` component; raw exceptions never reach the UI since the backend was already designed to only ever send friendly messages.
+
+**Backend changes — the only two, both because the frontend genuinely had no other way to get this data:**
+- `GET /repos/{repo_id}` → `RepoOut`. `GET /repos` only lists everything; the workspace top bar needs one repo's owner/name/url from the session's `repo_id`.
+- `GET /repos/{repo_id}/file-content?path=` → `{path, content, total_lines}`, reusing `file_tools.get_raw_file_content` (path-traversal-safe, already existed for `propose_fix`). Needed so clicking a hypothesis evidence chip can show the actual code snippet — nothing previously exposed raw file content to a client.
+Both in `app/routers/repos.py` + `app/schemas/repo.py`; 6 new tests in `tests/test_repos_router.py` (200 with real content, 404 missing file, 404 missing repo, 422 path traversal, plus the two `GET /repos/{id}` cases).
+
+**A real dev-environment finding, not a code bug:** `npm run dev` (webpack + `WATCHPACK_POLLING`, required on this drvfs-mounted filesystem for hot-reload to work at all — see Phase 1) took **17+ minutes** to cold-compile the `/workspace/[id]` route, confirmed CPU-active (not deadlocked) via `ps`/`free`, before being abandoned. Plain `next dev` (Turbopack, no polling) compiled the same route in **~14 seconds**. `next build` (always Turbopack regardless of the dev flag) was never affected — only webpack's *dev-mode* compiler combined with polling on this filesystem is this slow. Recommendation: use plain `next dev` for one-off verification/demo runs; keep `npm run dev` for actual development, since Turbopack dev doesn't support polling and hot-reload would silently stop working on this filesystem without it.
+
+**React 19 hooks-lint, 8 real findings, all fixed:** `eslint-config-next` 16 ships the newer `react-hooks` rules (`set-state-in-effect`, `refs`, `purity`) that flag patterns common in older React code. Fixed by switching every "read an external source on mount" hook (`useReducedMotion`, `useSoundEnabled`, the Wispr auto-send toggle) to `useSyncExternalStore` instead of `useState` + `useEffect`; moving a "keep a ref pointed at the latest callback" assignment from the render body into its own no-deps effect (`use-session-stream.ts`); and replacing an impure `useRef(Date.now())` initializer with `useRef(0)` (the real timestamp is always set before first read, via the same code paths that set it in `beginTurn`/the SSE handler).
+
+**Verification**: full real session via Playwright literally clicking the pagination-bug chip on the live landing page (`frontend/scripts/capture-screenshots.mjs`) — connected taskboard, created a session, watched the live trace (list_files → search_code "page" → read_file taskStore.js), hypothesis (high confidence, correct root cause, correct file:line), fix diff (correct one-line change), clicked **Accept fix** for real, and reached the resolved state with confetti — all through the actual UI, not a bypass. Screenshots (desktop 1440px + mobile 390px, landing + every workspace phase) at `frontend/screenshots/*.png`. `npm run lint` clean, `npm run build` clean, backend `pytest` → 105 passed, 2 skipped by design (unchanged skip set, 6 new passing tests from the two endpoints above).
+
+### Next: Phase 5
+
+Bug journal & search: resolution summaries surfaced in a journal UI, Postgres full-text search over resolved sessions, `words_spoken_count` aggregated across the journal (already surfaced per-session in the workspace).

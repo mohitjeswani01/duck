@@ -4,6 +4,9 @@ const nextConfig: NextConfig = {
   /* config options here */
   cacheComponents: true,
   partialPrefetching: true,
+  // The dev-mode build-activity badge sits bottom-left and overlaps the
+  // Wispr input / sound toggle in screenshots and on-stage demos.
+  devIndicators: false,
   turbopack: {
     rules: {
       "*.css": {
