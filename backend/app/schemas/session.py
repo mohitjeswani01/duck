@@ -61,6 +61,17 @@ class SessionStateResponse(BaseModel):
     words_spoken_count: int
     created_at: datetime
     updated_at: datetime
+    # True only while a background run_turn() task is genuinely still working
+    # on this session right now. False either because no turn is in progress,
+    # or because GET detected a stale turn_started_at (the process that set it
+    # crashed/restarted mid-turn) and self-healed it — see
+    # app/routers/sessions.py get_session(). The frontend uses this to never
+    # show "Duck is thinking" forever when nothing is actually happening.
+    turn_running: bool
+    # True only immediately after a turn stopped early on the wall-clock
+    # deadline — the frontend shows a "keep going" affordance instead of a
+    # plain error when this is set.
+    deadline_hit: bool
     messages: list[MessageOut]
     hypotheses: list[HypothesisOut]
     fixes: list[FixOut]

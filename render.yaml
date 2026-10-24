@@ -1,0 +1,148 @@
+# Render Blueprint for Duck's backend. Deploy via Render's dashboard ->
+# "New +" -> "Blueprint" -> point at this repo. Render reads this file from
+# the repo root and uses `rootDir` below to build/run from backend/ — the
+# frontend is deployed separately on Vercel (see CLAUDE.md "Deployment").
+#
+# Region is Singapore to match the Neon Postgres database's region — keeping
+# the app and DB in the same region avoids a cross-region round trip on
+# every single query, which matters a lot given how many DB calls one Duck
+# turn makes (messages, hypotheses, fixes, file_reads, usage tracking).
+services:
+  - type: web
+    name: duck-backend
+    runtime: python
+    region: singapore
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    # Migrations run on every deploy, before uvicorn starts, so a fresh
+    # deploy is never serving against a stale schema. $PORT is injected by
+    # Render at runtime — never hardcode a port. --host 0.0.0.0 is required:
+    # Render's proxy connects from outside the container, not localhost.
+    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      # --- Pin the runtime -----------------------------------------------
+      - key: PYTHON_VERSION
+        value: 3.12.3
+
+      # --- Core -------------------------------------------------------
+      - key: ENVIRONMENT
+        value: production
+      # Render injects its own $PORT at runtime; the start command reads
+      # that directly. This copy is only for admin/health responses.
+      - key: PORT
+        value: 8000
+      # Neon connection string (asyncpg form). Fill in during Blueprint
+      # setup or in the Render dashboard afterward — never committed.
+      - key: DATABASE_URL
+        sync: false
+
+      # --- Gemini -------------------------------------------------------
+      # Pinned to the pair that won scripts/benchmark_models.py in the
+      # hardening phase (gemini-3.6-flash: 3/3 success, ~11s avg). Re-run
+      # that benchmark close to the actual demo and update here if the
+      # live picture has changed — model performance varies with real-time
+      # demand on Google's side, this isn't a permanent ranking.
+      - key: GEMINI_MODEL
+        value: gemini-3.6-flash
+      - key: GEMINI_FALLBACK_MODEL
+        value: gemini-3.8-flash
+      # Comma-separated keys from 2-3 different Google accounts. Fill in
+      # during Blueprint setup — never committed.
+      - key: GEMINI_API_KEYS
+        sync: false
+      - key: GEMINI_KEY_COOLDOWN_SECONDS
+        value: 60
+      - key: GEMINI_SERVER_ERROR_COOLDOWN_SECONDS
+        value: 15
+      # Three free-tier keys, each good for comfortably more than this in a
+      # day on Google's side — the real constraint this cap protects isn't
+      # Google's quota, it's OUR quota surviving a no-login public demo day
+      # judges can hit from anywhere. ~10-15 Gemini calls per fully-resolved
+      # bug (per the hardening-phase eval) means 300 calls supports roughly
+      # 20-30 full sessions/day, comfortably more than a hackathon's judge
+      # traffic, while still leaving headroom below what the keys can take.
+      - key: GEMINI_DAILY_CALL_CAP
+        value: 300
+      - key: GEMINI_CALL_TIMEOUT_SECONDS
+        value: 25
+      # Hard ceiling for one whole user turn, regardless of how many key/model
+      # retries happen inside it — see CLAUDE.md "Turn deadline & crash
+      # recovery". This is the fix for the stuck-session bug; don't remove it.
+      - key: GEMINI_TURN_DEADLINE_SECONDS
+        value: 90
+      - key: GEMINI_MAX_ATTEMPTS_PER_CALL
+        value: 6
+      - key: GEMINI_THINKING_LEVEL
+        value: LOW
+      - key: GEMINI_HYPOTHESIS_THINKING_LEVEL
+        value: MEDIUM
+      - key: GEMINI_CONTEXT_KEEP_RECENT_TOOL_RESULTS
+        value: 6
+
+      # --- GitHub (optional) ---------------------------------------------
+      # Fine-grained PAT, "Public Repositories (read-only)" only. Optional —
+      # falls back to GitHub's unauthenticated 60/hr limit, which is fine
+      # since connecting a repo is only 2 API calls total.
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_REQUEST_TIMEOUT_SECONDS
+        value: 20
+
+      # --- Repo ingestion limits ------------------------------------------
+      - key: REPO_MAX_FILES
+        value: 500
+      - key: REPO_MAX_FILE_BYTES
+        value: 200000
+      - key: REPO_MAX_TOTAL_BYTES
+        value: 5000000
+      - key: REPO_CACHE_TTL_SECONDS
+        value: 3600
+
+      # --- File tool output caps -------------------------------------------
+      - key: TOOL_LIST_FILES_MAX_RESULTS
+        value: 200
+      - key: TOOL_READ_FILE_MAX_LINES
+        value: 300
+      - key: TOOL_SEARCH_MAX_RESULTS
+        value: 50
+      - key: TOOL_SEARCH_TIMEOUT_SECONDS
+        value: 3
+      - key: TOOL_OUTPUT_MAX_CHARS
+        value: 20000
+
+      # --- Must be false in production ------------------------------------
+      - key: ENABLE_DEV_TOOLS
+        value: false
+
+      # --- CORS -------------------------------------------------------
+      # Fill in with the deployed Vercel URL AFTER that deploy exists —
+      # chicken-and-egg on day one. Update this in the Render dashboard
+      # (Environment tab) once you have the Vercel URL, then redeploy. No
+      # wildcards — only the real deployed origin(s), comma-separated if more
+      # than one (e.g. a custom domain plus the vercel.app URL).
+      - key: ALLOWED_ORIGINS
+        sync: false
+
+      # --- Abuse protection -------------------------------------------
+      # Public, no-login app — these are deliberately conservative for a
+      # demo day, not loosened just because dev defaults were. All are env
+      # vars specifically so they can be raised from the Render dashboard
+      # with zero redeploy if traffic is higher than expected.
+      - key: RATE_LIMIT_SESSIONS_PER_IP_PER_HOUR
+        value: 5
+      - key: RATE_LIMIT_MESSAGES_PER_SESSION
+        value: 40
+      - key: MAX_TOOL_CALLS_PER_TURN
+        value: 15
+
+      # --- Conversation engine ----------------------------------------
+      - key: MAX_CLARIFYING_ROUNDS
+        value: 2
+      - key: MIN_QUESTIONS_PER_ROUND
+        value: 1
+      - key: MAX_QUESTIONS_PER_ROUND
+        value: 3
+      - key: SESSION_EVENT_QUEUE_MAX_SIZE
+        value: 200

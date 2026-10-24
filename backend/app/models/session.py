@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ARRAY, Computed, DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy import ARRAY, Boolean, Computed, DateTime, Enum, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -34,6 +34,18 @@ class Session(Base):
     # later migration is needed; surfaced in the UI once the journal (Phase 5) exists,
     # as evidence of how meaningfully Wispr dictation is actually used.
     words_spoken_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # Set the instant a background run_turn() task starts working on this
+    # session, cleared the instant it ends (success, error, or deadline) —
+    # not just in-memory state, so a GET /sessions/{id} from a *different*
+    # process after a crash/restart can tell a genuinely orphaned turn (this
+    # is set, but stale) apart from one still legitimately in progress.
+    turn_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # True only immediately after a turn stopped early because
+    # GEMINI_TURN_DEADLINE_SECONDS was hit (never left stuck — Duck always
+    # sends a summary message first). Reset to False the instant a new turn
+    # starts, since the user is now actively continuing.
+    deadline_hit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     search_vector: Mapped[str | None] = mapped_column(
         TSVECTOR, Computed(_SEARCH_VECTOR_EXPR, persisted=True), nullable=True

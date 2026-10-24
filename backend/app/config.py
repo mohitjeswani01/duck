@@ -32,6 +32,21 @@ class Settings(BaseSettings):
     # quickly instead of blocking the whole turn — a hang now costs at most
     # this long per key tried, not the old 45s.
     gemini_call_timeout_seconds: float = 25.0
+    # Hard wall-clock ceiling for one entire user turn (every retry, key failover,
+    # model fallback, and tool-calling loop iteration combined). Without this, a
+    # turn's total duration is only bounded by gemini_call_timeout_seconds *
+    # (num_keys * 2 models) * max_tool_calls_per_turn, which multiplies out to
+    # tens of minutes in a sustained Gemini outage — exactly what produced the
+    # 6+ minute stuck session this setting exists to prevent. When the deadline
+    # hits mid-turn, the loop stops immediately and Duck sends a locally-built
+    # (no further Gemini call) summary of what it found so far, never a silent hang.
+    gemini_turn_deadline_seconds: float = 90.0
+    # Hard cap on total Gemini SDK call attempts for one logical "Gemini call" in
+    # the tool-calling loop (summed across every key AND both models, not per key).
+    # Without this, execute_with_fallback() trying every key on two models could
+    # still mean up to 2 * len(keys) real network attempts before the loop even
+    # gets to check the turn deadline between attempts.
+    gemini_max_attempts_per_call: int = 6
     # Older tool results beyond this many most-recent ones get their bulky payload
     # replaced with a short placeholder before the next Gemini call, so long
     # sessions don't blow up context size or cost.

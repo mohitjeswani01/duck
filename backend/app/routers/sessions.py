@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -28,6 +29,14 @@ from app.services.conversation_engine import TurnTrigger, run_turn
 from app.services.title import generate_title
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+
+# How much longer than the turn deadline we wait before concluding a
+# turn_started_at timestamp is stale (the process that set it crashed or was
+# redeployed mid-turn) rather than just a turn that's about to hit its own
+# deadline normally. Generous on purpose — this only ever matters when
+# *nothing* cleared the marker, which a normal turn always does on every exit
+# path (see conversation_engine.run_turn's finally block).
+_STALE_TURN_GRACE_SECONDS = 30
 
 
 async def _get_active_session(db: AsyncSession, session_id: uuid.UUID) -> SessionModel:
@@ -171,9 +180,54 @@ async def reject_fix(
     return await _decide_fix(session_id, fix_id, False, body.feedback, db)
 
 
+async def _resolve_turn_running(db: AsyncSession, session: SessionModel, settings: Settings) -> bool:
+    """True only while a background run_turn() task is genuinely still
+    working on this session. If turn_started_at is set but older than the
+    turn deadline plus a grace window, the process that set it must have
+    crashed or been redeployed mid-turn (a normal turn always clears this in
+    its finally block, on every exit path, deadline included) — self-heal by
+    clearing it here and telling the caller nothing is running, rather than
+    leaving the session looking permanently "busy" to every future visitor."""
+    if session.turn_started_at is None:
+        return False
+
+    started_at = session.turn_started_at
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    age_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
+    stale_after = settings.gemini_turn_deadline_seconds + _STALE_TURN_GRACE_SECONDS
+    if age_seconds <= stale_after:
+        return True
+
+    session.turn_started_at = None
+    db.add(
+        Message(
+            session_id=session.id,
+            role=MessageRole.assistant,
+            phase_at_time=session.current_phase,
+            content=(
+                "Duck's server restarted while it was looking into this. "
+                "Tell it to keep going and it'll pick up from here."
+            ),
+        )
+    )
+    await db.commit()
+    # The UPDATE above bumps `updated_at` (onupdate=func.now(), server-side) —
+    # a server-generated column SQLAlchemy can't know the new value for
+    # without asking, so it's left "expired" even with expire_on_commit=False.
+    # An explicit async refresh avoids the handler's later plain attribute
+    # read (session.updated_at) triggering an implicit lazy-load that fails
+    # outside the greenlet context async SQLAlchemy needs for that.
+    await db.refresh(session)
+    return False
+
+
 @router.get("/{session_id}", response_model=SessionStateResponse)
-async def get_session(session_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> SessionStateResponse:
+async def get_session(
+    session_id: uuid.UUID, db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings)
+) -> SessionStateResponse:
     session = await _get_active_session(db, session_id)
+    turn_running = await _resolve_turn_running(db, session, settings)
 
     messages = (
         (await db.execute(select(Message).where(Message.session_id == session_id).order_by(Message.created_at)))
@@ -203,6 +257,8 @@ async def get_session(session_id: uuid.UUID, db: AsyncSession = Depends(get_db))
         words_spoken_count=session.words_spoken_count,
         created_at=session.created_at,
         updated_at=session.updated_at,
+        turn_running=turn_running,
+        deadline_hit=session.deadline_hit,
         messages=[
             MessageOut(role=m.role, phase_at_time=m.phase_at_time, content=m.content, created_at=m.created_at)
             for m in messages

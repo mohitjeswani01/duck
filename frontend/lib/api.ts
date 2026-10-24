@@ -15,15 +15,38 @@ export class ApiError extends Error {
   }
 }
 
+// Render's free tier fully stops the backend container when idle and takes
+// up to ~50s to cold-start it back up. During that window, fetch() doesn't
+// come back *slow* — it throws outright, because nothing is listening on the
+// port yet. Without retrying here, every very first request after a cold
+// instance would surface as a hard "unreachable" failure instead of the
+// "waking Duck up" experience the UI is built to show. Only network-level
+// failures (fetch throwing) are retried — a real HTTP error response means
+// the server IS up and answered, so that's surfaced immediately, not retried.
+const WAKE_RETRY_BUDGET_MS = 55_000;
+const WAKE_RETRY_INTERVAL_MS = 2_500;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const deadline = Date.now() + WAKE_RETRY_BUDGET_MS;
+
   let response: Response;
-  try {
-    response = await fetch(`${API_URL}${path}`, {
-      ...init,
-      headers: { "Content-Type": "application/json", ...init?.headers },
-    });
-  } catch {
-    throw new ApiError(0, "Duck's backend isn't reachable right now. Check your connection and try again.");
+  while (true) {
+    try {
+      response = await fetch(`${API_URL}${path}`, {
+        ...init,
+        headers: { "Content-Type": "application/json", ...init?.headers },
+      });
+      break;
+    } catch {
+      if (Date.now() >= deadline) {
+        throw new ApiError(0, "Duck's backend isn't reachable right now. Check your connection and try again.");
+      }
+      await sleep(WAKE_RETRY_INTERVAL_MS);
+    }
   }
 
   if (!response.ok) {
@@ -135,6 +158,15 @@ export interface SessionStateResponse {
   words_spoken_count: number;
   created_at: string;
   updated_at: string;
+  // True only while a turn is genuinely still running server-side. False
+  // either because nothing is in progress, or because the backend detected a
+  // stale/orphaned turn (e.g. it restarted mid-turn) and self-healed it —
+  // either way, the frontend should never show "Duck is thinking" when this
+  // is false, no matter what local state it was tracking before.
+  turn_running: boolean;
+  // True immediately after a turn stopped early because Gemini was too slow
+  // to respond within the turn deadline — drives the "keep going" button.
+  deadline_hit: boolean;
   messages: MessageOut[];
   hypotheses: HypothesisOut[];
   fixes: FixOut[];

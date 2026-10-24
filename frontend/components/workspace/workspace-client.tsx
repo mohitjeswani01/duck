@@ -89,6 +89,18 @@ export function WorkspaceClient({ sessionId }: { sessionId: string }) {
       .then(async (data) => {
         if (cancelled) return;
         setSession(data);
+        // A turn can genuinely still be running server-side when this page
+        // loads (e.g. opened in a second tab, or reloaded mid-turn) — reflect
+        // that immediately instead of looking idle while something's
+        // actually happening. The reverse (backend restarted mid-turn) is
+        // already handled server-side: GET /sessions/{id} self-heals a stale
+        // turn_started_at before we ever see it, so data.turn_running is
+        // already correct either way.
+        if (data.turn_running) {
+          setBusy(true);
+          setStatusText("Duck is still looking into this…");
+          lastEventAtRef.current = Date.now();
+        }
         try {
           const repoData = await getRepo(data.repo_id);
           if (!cancelled) setRepo(repoData);
@@ -132,9 +144,23 @@ export function WorkspaceClient({ sessionId }: { sessionId: string }) {
     [refreshSession]
   );
 
-  const handleReconnect = useCallback(() => {
-    void refreshSession();
-  }, [refreshSession]);
+  const handleReconnect = useCallback(async () => {
+    // A dropped-then-reopened SSE connection is exactly the situation where
+    // the backend process could have restarted mid-turn and we'd otherwise
+    // never see another event for this turn again — check the durable
+    // turn_running flag (not just re-fetch-and-hope) so the input doesn't
+    // stay disabled forever waiting for a "done" that's never coming.
+    try {
+      const data = await getSession(sessionId);
+      setSession(data);
+      if (!data.turn_running) {
+        setBusy(false);
+        setStatusText(undefined);
+      }
+    } catch (err) {
+      setBannerError(err instanceof ApiError ? err.message : "Couldn't reconnect to this session.");
+    }
+  }, [sessionId]);
 
   useSessionStream(session ? sessionId : null, { onEvent: handleEvent, onReconnect: handleReconnect });
 
@@ -168,6 +194,8 @@ export function WorkspaceClient({ sessionId }: { sessionId: string }) {
             ...s,
             messages: [...s.messages, { role: "user", phase_at_time: s.current_phase, content: text, created_at: new Date().toISOString() }],
             words_spoken_count: s.words_spoken_count + wordCount,
+            turn_running: true,
+            deadline_hit: false,
           }
         : s
     );
@@ -178,6 +206,10 @@ export function WorkspaceClient({ sessionId }: { sessionId: string }) {
       setStatusText(undefined);
       setBannerError(err instanceof ApiError ? err.message : "Couldn't send that message.");
     }
+  }
+
+  function handleKeepGoing() {
+    void handleSendMessage("Keep going.");
   }
 
   async function handleAccept() {
@@ -256,6 +288,8 @@ export function WorkspaceClient({ sessionId }: { sessionId: string }) {
           statusText={statusText}
           wordsSpokenCount={session.words_spoken_count}
           phase={session.current_phase}
+          deadlineHit={session.deadline_hit}
+          onKeepGoing={handleKeepGoing}
         />
         <InvestigationColumn
           phase={session.current_phase}

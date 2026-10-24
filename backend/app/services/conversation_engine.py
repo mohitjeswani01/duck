@@ -24,6 +24,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from google.genai import types
 from sqlalchemy import select
@@ -43,6 +44,23 @@ from app.services.tool_declarations import ALL_TOOLS
 logger = logging.getLogger("duck.conversation_engine")
 
 
+class TurnDeadlineExceeded(Exception):
+    """Raised the instant the per-turn wall-clock deadline (GEMINI_TURN_DEADLINE_SECONDS)
+    is hit, from inside the innermost retry attempt. Always caught in run_turn and
+    turned into a locally-built summary message (no further Gemini call, so it can
+    never itself hang) — never surfaced to the user as a raw error, and never left
+    to retry: _is_transient() doesn't recognize this type, so GeminiKeyPool.execute()
+    re-raises it immediately instead of trying another key or the fallback model."""
+
+
+class GeminiAttemptsExhaustedError(Exception):
+    """Raised when a single logical Gemini call has used up GEMINI_MAX_ATTEMPTS_PER_CALL
+    real SDK attempts — summed across every key AND both models, since that's what
+    "a single Gemini call" means to the caller — without ever succeeding. Distinct
+    from GeminiAllKeysExhaustedError (which means every key is cooling/disabled);
+    this means we simply stopped trying, independent of key health state."""
+
+
 @dataclass
 class TurnTrigger:
     kind: str  # "user_message" | "fix_accepted" | "fix_rejected"
@@ -54,6 +72,10 @@ class TurnMetrics:
     gemini_calls: int = 0
     tool_calls: int = 0
     total_seconds: float = 0.0
+    # Short labels (file paths / search queries) gathered as file tools are
+    # dispatched this turn, so a deadline-triggered wrap-up can tell the user
+    # what Duck actually looked at without needing another Gemini call to ask.
+    files_investigated: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -169,24 +191,84 @@ def _thinking_level_for_phase(settings: Settings, phase: SessionPhase) -> types.
     return types.ThinkingLevel[level_name]
 
 
+def _sync_generate_content(client, model: str, contents: list[types.Content], config: types.GenerateContentConfig):
+    """Deliberately the SYNCHRONOUS client method, run via asyncio.to_thread in
+    _call_gemini below — not awaited directly. Reading google-genai's
+    _api_client.py confirms its httpx transport is constructed with
+    timeout=None whenever the caller doesn't override it (we don't), so a slow
+    or stuck Gemini response has *no network-level ceiling at all* on either
+    the sync or async client; the only thing that would stand between us and a
+    true hang is asyncio.wait_for's cooperative cancellation of that call —
+    a single point of failure inside a third-party SDK we don't control, and
+    the prime suspect for the 803-second single-call hang documented in the
+    hardening phase and the 6+ minute stuck session this fix exists for.
+    Running the sync call in a worker thread and wait_for-ing *that* future
+    instead means our deadline is enforced by simply walking away from the
+    wait — asyncio.to_thread's wrapper future supports cancellation from the
+    awaiting side regardless of whether the code inside the thread ever
+    cooperates. The thread itself can't be killed and may keep running
+    harmlessly in the background until it finishes on its own; nothing
+    awaits its result anymore, so it's just discarded."""
+    return client.models.generate_content(model=model, contents=contents, config=config)
+
+
 async def _call_gemini(
     pool: GeminiKeyPool,
     settings: Settings,
     contents: list[types.Content],
     config: types.GenerateContentConfig,
+    deadline: float,
 ):
-    async def op(client, model: str):
-        return await client.aio.models.generate_content(model=model, contents=contents, config=config)
+    """`deadline` is a time.monotonic() timestamp for the *whole turn*, not just
+    this call — checked before every single attempt (every key, every model),
+    so no amount of key/model retrying can ever push past it. `attempts` caps
+    the total real SDK calls for this one logical Gemini call (summed across
+    every key and both models) independent of the deadline, per
+    GEMINI_MAX_ATTEMPTS_PER_CALL."""
+    attempts = 0
 
     async def with_timeout(client, model: str):
-        return await asyncio.wait_for(op(client, model), timeout=settings.gemini_call_timeout_seconds)
+        nonlocal attempts
+        if attempts >= settings.gemini_max_attempts_per_call:
+            raise GeminiAttemptsExhaustedError()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TurnDeadlineExceeded()
+        attempts += 1
+        timeout = max(0.1, min(settings.gemini_call_timeout_seconds, remaining))
+        return await asyncio.wait_for(
+            asyncio.to_thread(_sync_generate_content, client, model, contents, config),
+            timeout=timeout,
+        )
 
     return await pool.execute_with_fallback(with_timeout, settings.gemini_model, settings.gemini_fallback_model)
 
 
-async def _force_wrap_up(pool, settings, engine_state, system_instruction) -> str:
+def _build_deadline_summary(metrics: "TurnMetrics") -> str:
+    """Built entirely from local state already in memory — never calls Gemini
+    again, so this message can never itself be the thing that hangs."""
+    if metrics.files_investigated:
+        shown = metrics.files_investigated[:3]
+        remainder = len(metrics.files_investigated) - len(shown)
+        files_text = ", ".join(f"`{f}`" for f in shown)
+        if remainder > 0:
+            files_text += f", and {remainder} more"
+        detail = f" So far I've looked at {files_text}."
+    else:
+        detail = ""
+    return (
+        "Gemini is being slow right now, so I've paused here instead of leaving you waiting."
+        f"{detail} You can tell me to keep going and I'll pick up where I left off."
+    )
+
+
+async def _force_wrap_up(pool, settings, engine_state, system_instruction, deadline: float) -> str:
     """Hit the per-turn tool-call cap: one final call with tools removed,
-    asking Gemini to summarize findings so far instead of failing silently."""
+    asking Gemini to summarize findings so far instead of failing silently.
+    Still deadline-aware — if the turn deadline is nearly up, this call can
+    itself raise TurnDeadlineExceeded/GeminiAttemptsExhaustedError, which
+    run_turn catches the same way it catches everything else from the main
+    loop, falling back to the local (non-Gemini) summary instead."""
     wrap_up = types.Content(
         role="user",
         parts=[
@@ -204,7 +286,7 @@ async def _force_wrap_up(pool, settings, engine_state, system_instruction) -> st
         thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel[settings.gemini_thinking_level]),
     )
 
-    response = await _call_gemini(pool, settings, contents, config)
+    response = await _call_gemini(pool, settings, contents, config, deadline)
     engine_state.gemini_contents.append(wrap_up)
     engine_state.gemini_contents.append(response.candidates[0].content)
     return (response.text or "").strip()
@@ -220,6 +302,7 @@ async def _run_gemini_loop(
     emit,
     engine_state: _EngineSessionState,
     metrics: TurnMetrics,
+    deadline: float,
 ) -> None:
     system_instruction = build_system_prompt(repo.owner, repo.name)
     tool_calls_this_turn = 0
@@ -240,7 +323,7 @@ async def _run_gemini_loop(
         # still spent real time (and, for a timeout, possibly real quota) and should
         # show up in the metrics, not just the calls that happened to succeed.
         metrics.gemini_calls += 1
-        response = await _call_gemini(pool, settings, engine_state.gemini_contents, config)
+        response = await _call_gemini(pool, settings, engine_state.gemini_contents, config, deadline)
 
         model_content = response.candidates[0].content
         engine_state.gemini_contents.append(model_content)
@@ -271,6 +354,11 @@ async def _run_gemini_loop(
                     function_response={"error": "Tool call limit reached for this turn."}, is_error=True
                 )
             else:
+                if fc.name in ("read_file", "search_code", "list_files"):
+                    args = fc.args or {}
+                    label = args.get("path") or args.get("query") or args.get("pattern") or "files"
+                    if label not in metrics.files_investigated:
+                        metrics.files_investigated.append(label)
                 outcome = await control_tools.dispatch(fc.name, fc.args or {}, db, session, settings, emit)
                 tool_calls_this_turn += 1
                 metrics.tool_calls += 1
@@ -289,7 +377,7 @@ async def _run_gemini_loop(
 
         if tool_calls_this_turn >= settings.max_tool_calls_per_turn:
             metrics.gemini_calls += 1
-            summary = await _force_wrap_up(pool, settings, engine_state, system_instruction)
+            summary = await _force_wrap_up(pool, settings, engine_state, system_instruction, deadline)
             if summary:
                 db.add(
                     Message(
@@ -319,6 +407,7 @@ async def run_turn(session_id: uuid.UUID, trigger: TurnTrigger) -> TurnMetrics:
     emit = _make_emit(session_id, settings)
 
     start = time.monotonic()
+    deadline = start + settings.gemini_turn_deadline_seconds
     metrics = TurnMetrics()
 
     async with AsyncSessionLocal() as db:
@@ -339,13 +428,31 @@ async def run_turn(session_id: uuid.UUID, trigger: TurnTrigger) -> TurnMetrics:
             engine_state.initialized = True
 
         user_text = await _apply_trigger(db, session, trigger, emit)
+        # Marks this session as "a turn is actively running" with a durable,
+        # real timestamp — not just in-memory state — so a GET /sessions/{id}
+        # from a *different* process (e.g. after this one crashed/restarted
+        # mid-turn) can tell a genuinely-orphaned turn apart from one that's
+        # still legitimately in progress. Starting a fresh turn always clears
+        # any previous deadline_hit, since the user is now actively continuing.
+        session.turn_started_at = datetime.now(timezone.utc)
+        session.deadline_hit = False
         await db.commit()
 
         if user_text is not None:
             engine_state.gemini_contents.append(types.Content(role="user", parts=[types.Part.from_text(text=user_text)]))
 
         try:
-            await _run_gemini_loop(db, session, repo, settings, pool, tracker, emit, engine_state, metrics)
+            await _run_gemini_loop(db, session, repo, settings, pool, tracker, emit, engine_state, metrics, deadline)
+        except (TurnDeadlineExceeded, GeminiAttemptsExhaustedError):
+            # The one path that must never itself call Gemini again — the whole
+            # point is that this can't hang even if Gemini is completely stuck.
+            summary = _build_deadline_summary(metrics)
+            db.add(
+                Message(session_id=session.id, role=MessageRole.assistant, phase_at_time=session.current_phase, content=summary)
+            )
+            session.deadline_hit = True
+            await db.commit()
+            await emit(AssistantMessageEvent(session_id=session.id, phase=session.current_phase, content=summary))
         except GeminiAllKeysExhaustedError:
             await emit(ErrorEvent(message="Duck needs a short breather — try again in a minute."))
         except GeminiDailyCapExceededError:
@@ -361,8 +468,12 @@ async def run_turn(session_id: uuid.UUID, trigger: TurnTrigger) -> TurnMetrics:
                 "turn complete session_id=%s gemini_calls=%d tool_calls=%d seconds=%.2f",
                 session_id, metrics.gemini_calls, metrics.tool_calls, metrics.total_seconds,
             )
+            # Always cleared, on every exit path (success, any error, or the
+            # deadline) — this is the "a turn is running" marker's whole job.
+            session.turn_started_at = None
             if session.current_phase == SessionPhase.resolved:
                 forget_session(session_id)
+            await db.commit()
             await emit(DoneEvent(session_id=session_id))
 
     return metrics

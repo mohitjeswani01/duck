@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import Link from "next/link";
-import { Home, MessageSquareText, RotateCcw } from "lucide-react";
+import { Home, MessageSquareText, PlayCircle, RotateCcw } from "lucide-react";
 import { MessageBubble } from "@/components/workspace/message-bubble";
 import { WisprInput } from "@/components/duck/wispr-input";
 import type { MessageOut } from "@/lib/api";
@@ -15,9 +15,20 @@ interface ConversationColumnProps {
   statusText?: string;
   wordsSpokenCount: number;
   phase: SessionPhase;
+  deadlineHit: boolean;
+  onKeepGoing: () => void;
 }
 
-export function ConversationColumn({ messages, onSendMessage, busy, statusText, wordsSpokenCount, phase }: ConversationColumnProps) {
+export function ConversationColumn({
+  messages,
+  onSendMessage,
+  busy,
+  statusText,
+  wordsSpokenCount,
+  phase,
+  deadlineHit,
+  onKeepGoing,
+}: ConversationColumnProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -66,16 +77,31 @@ export function ConversationColumn({ messages, onSendMessage, busy, statusText, 
             </div>
           </div>
         ) : (
-          <WisprInput
-            onSubmit={onSendMessage}
-            disabled={busy || awaitingFixDecision}
-            placeholder={
-              awaitingFixDecision
-                ? "Use Accept fix / This doesn't fix it in the investigation panel →"
-                : "Hold your Wispr key and just talk."
-            }
-            statusText={statusText}
-          />
+          <div className="flex flex-col gap-2">
+            {deadlineHit && !busy && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border-2 border-ink bg-duck-soft px-3.5 py-2.5">
+                <p className="text-sm font-semibold">Gemini was slow to respond, so Duck paused.</p>
+                <button
+                  type="button"
+                  onClick={onKeepGoing}
+                  className="press-down inline-flex items-center gap-1.5 rounded-full border-2 border-ink bg-ink px-3 py-1.5 text-sm font-bold text-cream shadow-brutal-sm"
+                >
+                  <PlayCircle className="size-3.5" aria-hidden />
+                  Keep going
+                </button>
+              </div>
+            )}
+            <WisprInput
+              onSubmit={onSendMessage}
+              disabled={busy || awaitingFixDecision}
+              placeholder={
+                awaitingFixDecision
+                  ? "Use Accept fix / This doesn't fix it in the investigation panel →"
+                  : "Hold your Wispr key and just talk."
+              }
+              statusText={statusText}
+            />
+          </div>
         )}
       </div>
     </div>
